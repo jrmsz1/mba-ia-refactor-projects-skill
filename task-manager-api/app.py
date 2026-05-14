@@ -1,34 +1,53 @@
-from flask import Flask
+import logging
+from datetime import datetime
+
+from flask import Flask, jsonify
 from flask_cors import CORS
-from database import db
-from routes.task_routes import task_bp
-from routes.user_routes import user_bp
-from routes.report_routes import report_bp
-import os, sys, json, datetime
 
-app = Flask(__name__)
+from config.settings import Config
+from models.database import db
+from views.task_routes import task_bp
+from views.user_routes import user_bp
+from views.category_routes import category_bp
+from views.report_routes import report_bp
+from middlewares.error_handler import register_error_handlers
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SECRET_KEY'] = 'super-secret-key-123'
 
-CORS(app)
-db.init_app(app)
+def create_app(config_object=Config):
+    app = Flask(__name__)
+    app.config.from_object(config_object)
 
-app.register_blueprint(task_bp)
-app.register_blueprint(user_bp)
-app.register_blueprint(report_bp)
+    logging.basicConfig(
+        level=logging.DEBUG if app.config.get('DEBUG') else logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
 
-@app.route('/health')
-def health():
-    return {'status': 'ok', 'timestamp': str(datetime.datetime.now())}
+    CORS(app)
+    db.init_app(app)
 
-@app.route('/')
-def index():
-    return {'message': 'Task Manager API', 'version': '1.0'}
+    app.register_blueprint(task_bp)
+    app.register_blueprint(user_bp)
+    app.register_blueprint(category_bp)
+    app.register_blueprint(report_bp)
 
-with app.app_context():
-    db.create_all()
+    register_error_handlers(app)
+
+    @app.route('/health')
+    def health():
+        return jsonify({'status': 'ok', 'timestamp': str(datetime.utcnow())}), 200
+
+    @app.route('/')
+    def index():
+        return jsonify({'message': 'Task Manager API', 'version': '1.0'}), 200
+
+    with app.app_context():
+        db.create_all()
+
+    return app
+
+
+app = create_app()
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=Config.DEBUG, host=Config.HOST, port=Config.PORT)
