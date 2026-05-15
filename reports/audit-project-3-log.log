@@ -1,0 +1,240 @@
+================================
+  ARCHITECTURE AUDIT REPORT
+  ================================
+  Project: task-manager-api
+  Stack:   Python 3.x + Flask 3.0.0 (with Flask-SQLAlchemy 3.1.1)
+  Files:   11 analyzed | ~900 lines of code
+
+  ## Summary
+  CRITICAL: 4 | HIGH: 6 | MEDIUM: 5 | LOW: 5
+  Total findings: 20
+
+  ## Findings
+  (ordered CRITICAL → HIGH → MEDIUM → LOW; within same severity, ordered by file)
+
+  ---
+
+  ### [CRITICAL] Hardcoded Credentials / Secrets
+  File: app.py:11-13
+  Description: Database URI and Flask secret key are written directly in source code:
+  `app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///tasks.db'` and `app.config['SECRET_KEY'] =
+  'super-secret-key-123'`.
+  Impact: Any developer with repo access can forge session tokens; secrets get committed to VCS and cannot be rotated
+  per environment.
+  Recommendation: Extract to `src/config/settings.py` and load via `os.environ.get(...)` after `python-dotenv` (already
+  in requirements.txt). Create `.env` (gitignored) and `.env.example` with placeholders.
+
+  ---
+
+  ### [CRITICAL] Hardcoded SMTP Credentials in Service
+  File: services/notification_service.py:7-10
+  Description: Email host, port, sender address, and a plaintext password (`self.email_password = 'senha123'`) are
+  hardcoded inside the `NotificationService.__init__` method.
+  Impact: SMTP credentials committed to VCS — anyone reading the repo can send mail as the application identity;
+  rotating the password requires a code change.
+  Recommendation: Move SMTP settings to `src/config/settings.py` and read them from environment variables; inject them
+  into the service.
+
+  ---
+
+  ### [CRITICAL] Insecure Password Hashing (MD5)
+  File: models/user.py:27-32
+  Description: `set_password` and `check_password` hash with `hashlib.md5(pwd.encode()).hexdigest()` — MD5 is
+  cryptographically broken and unsuitable for password storage (fast, no salt, susceptible to rainbow tables and
+  collision attacks).
+  Impact: User passwords are effectively recoverable from the database; a data breach exposes all credentials.
+  Recommendation: Replace with `bcrypt` or `argon2-cffi`; store the resulting hash (with salt) in the `password` column.
+   Update `seed.py` accordingly. Add `bcrypt>=4.0.0` to `requirements.txt`.
+
+  ---
+
+  ### [CRITICAL] Password Returned in API Responses
+  File: models/user.py:16-25
+  Description: `User.to_dict()` returns the `password` (hash) field. This dict is then returned to the client in `GET
+  /users/:id`, `POST /users`, `PUT /users/:id`, and `POST /login` (`user_routes.py:33, 86, 129, 209`).
+  Impact: The password hash is leaked over the API, accelerating offline cracking — particularly devastating combined
+  with MD5 hashing.
+  Recommendation: Remove `password` from `to_dict()`; expose only safe fields. Authentication endpoints must never echo
+  the hash.
+
+  ---
+
+  ### [HIGH] Business Logic and DB Queries in Route Handlers
+  File: routes/task_routes.py:11-63 (`get_tasks`)
+  Description: 53-line handler reads all tasks, runs per-task `User.query.get(t.user_id)` and
+  `Category.query.get(t.category_id)` calls inside a for-loop, recomputes the overdue flag inline, and assembles
+  response dicts manually — mixing data access, business rules, and presentation.
+  Impact: Untestable without spinning up Flask + SQLAlchemy; duplicates logic that already exists on `Task.is_overdue()`
+   and `Task.to_dict()`.
+  Recommendation: Move orchestration into `controllers/task_controller.py::list_tasks()`; route becomes a thin call to
+  the controller.
+
+  ---
+
+  ### [HIGH] Business Logic in Route Handler — Task Creation/Update
+  File: routes/task_routes.py:85-223 (`create_task`, `update_task`)
+  Description: Each handler is ~70 lines combining JSON parsing, field-by-field validation (title length, status enum,
+  priority range, user/category existence checks), date parsing, persistence, and logging via `print()`.
+  Impact: No way to unit-test the validation rules in isolation; same rules already partially live in
+  `utils/helpers.py::process_task_data` and on the model — three sources of truth.
+  Recommendation: Extract a `TaskController.create_task(payload)` / `update_task(task_id, payload)` that delegates to
+  `TaskModel`; consolidate validation rules in one place (controller or schema).
+
+  ---
+
+  ### [HIGH] Business Logic in Route Handler — Reports
+  File: routes/report_routes.py:12-155 (`summary_report`, `user_report`)
+  Description: `summary_report` is ~90 lines computing per-status counts, per-priority counts, recent activity, overdue
+  list, and per-user productivity with N+1 queries (line 56: `Task.query.filter_by(user_id=u.id).all()` inside a loop
+  over all users). `user_report` similarly computes statistics inline (~50 lines).
+  Impact: Reports cannot be tested or reused; query plan grows linearly with the number of users.
+  Recommendation: Move aggregation logic to `controllers/report_controller.py`; expose model methods like
+  `TaskModel.count_by_status()`, `TaskModel.list_overdue()`, etc.
+
+  ---
+
+  ### [HIGH] Business Logic in Route Handler — User CRUD and Login
+  File: routes/user_routes.py:42-211
+  Description: `create_user` (~50 lines), `update_user` (~40 lines), `delete_user` (manual cascade delete of related
+  tasks at lines 140-145), and `login` (~30 lines) all mix HTTP, validation, persistence and ad-hoc business rules (e.g.
+   role whitelist, email regex, fake-token construction).
+  Impact: Authentication logic is not isolated from HTTP, making testing and future hardening (rate limiting, real JWT)
+  painful. The manual cascade delete duplicates what should be an ORM relationship configuration.
+  Recommendation: Extract `UserController` covering `create_user`, `update_user`, `delete_user`, `authenticate`; move
+  email regex and password rules to controller/config; configure SQLAlchemy `cascade='all, delete-orphan'` on
+  `User.tasks`.
+
+  ---
+
+  ### [HIGH] Missing Centralized Error Handler
+  File: app.py:1-35
+  Description: No `@app.errorhandler` is registered anywhere. Each route handles errors locally with bare `except:` /
+  `except Exception as e:` blocks that swallow the underlying exception and return generic 500s (e.g.
+  `routes/task_routes.py:62-63, 152-154, 221-223, 235-238`).
+  Impact: Inconsistent error responses; real causes hidden from observability; bare `except:` masks programming bugs.
+  Recommendation: Add `src/middlewares/error_handler.py::register_error_handlers(app)` covering
+  400/404/422/500/Exception with structured JSON; remove ad-hoc try/except wrappers that only re-emit a generic message.
+
+  ---
+
+  ### [HIGH] Validation Logic Duplicated in Three Layers
+  File: routes/task_routes.py:110-114, 167-184; utils/helpers.py:57-108; models/task.py:38-48
+  Description: Status whitelist `['pending','in_progress','done','cancelled']`, priority range 1-5, and title length
+  rules are repeated verbatim in the route handlers, in `utils/helpers.py::process_task_data`, and on the `Task` model
+  itself — but `process_task_data` is never actually called.
+  Impact: Any rule change requires editing three places; the unused helper rots silently and may diverge from the real
+  rules.
+  Recommendation: Define rules once (constants in `config/settings.py` or a controller); delete the dead
+  `process_task_data` function or wire it as the single source of truth.
+
+  ---
+
+  ### [MEDIUM] N+1 Query — Task Listing with User/Category Lookups
+  File: routes/task_routes.py:41-57
+  Description: For each task in the result set, `get_tasks` runs a separate `User.query.get(t.user_id)` and
+  `Category.query.get(t.category_id)` (lines 42, 51). 100 tasks ⇒ up to 201 DB round-trips.
+  Impact: Listing latency grows linearly with task count; the relationships (`User`/`Category`) are already declared on
+  the model and could be eagerly loaded.
+  Recommendation: Use `Task.query.options(db.joinedload(Task.user), db.joinedload(Task.category)).all()` in the model
+  layer, or include user_name/category_name in `Task.to_dict()` via the existing relationship.
+
+  ---
+
+  ### [MEDIUM] N+1 Query — User Productivity Section of Summary Report
+  File: routes/report_routes.py:53-68
+  Description: `for u in users:` runs `Task.query.filter_by(user_id=u.id).all()` per user (line 56), then iterates again
+   to count completed tasks. Same with per-priority counts above using five separate `COUNT` queries (lines 24-28).
+  Impact: Reporting latency grows linearly with user count; could be a single GROUP BY query.
+  Recommendation: Replace with one aggregated query: `db.session.query(Task.user_id, Task.status,
+  func.count()).group_by(Task.user_id, Task.status).all()` and pivot in Python; similarly aggregate priority counts.
+
+  ---
+
+  ### [MEDIUM] Bare `except:` Clauses Swallow Errors
+  File: routes/task_routes.py:62, 137, 204, 236; routes/user_routes.py:130, 149; routes/report_routes.py:187, 207, 222;
+  utils/helpers.py:46, 49, 88
+  Description: ~12 bare `except:` or `except Exception:` blocks that either return a generic 500 or silently set a value
+   to `None`, with no logging of the actual exception.
+  Impact: Real bugs (typos, schema mismatches, encoding issues) become invisible 500s with no stack trace; debugging
+  requires reproducing locally.
+  Recommendation: Replace with specific exception types (`ValueError`, `SQLAlchemyError`) and centralize in the error
+  handler; log exceptions via `logger.exception()`.
+
+  ---
+
+  ### [MEDIUM] Manual Cascade Delete (Should Be ORM Relationship)
+  File: routes/user_routes.py:140-145
+  Description: Before deleting a user, the route manually queries all their tasks and deletes them one by one in Python.
+  Impact: Race condition between the two transactions; the loop issues N+1 DELETE statements that a `cascade`
+  declaration would handle in one statement.
+  Recommendation: Declare `cascade='all, delete-orphan'` on the `User.tasks` backref (or set `ON DELETE CASCADE` at the
+  FK level) and remove the manual loop.
+
+  ---
+
+  ### [MEDIUM] `db.create_all()` at Import Time
+  File: app.py:30-31
+  Description: Schema creation runs unconditionally inside `with app.app_context():` at module import, every time `app`
+  is imported (including by `seed.py`).
+  Impact: Side-effect at import-time is a foot-gun for testing and migrations; will fight Alembic if it is added later.
+  Recommendation: Move into a `create_app()` factory or an explicit `flask init-db` CLI command; only call at the
+  application entrypoint.
+
+  ---
+
+  ### [LOW] Magic Strings — Status and Role Whitelists
+  File: routes/task_routes.py:110, 177; routes/user_routes.py:71, 120; models/task.py:39
+  Description: Literal lists `['pending','in_progress','done','cancelled']` and `['user','admin','manager']` appear
+  inline in five different places; same for `'#000000'` default color (`models/category.py:10`, `utils/helpers.py:116`).
+  Impact: Adding a new status or role requires touching five files; easy to miss one and create a silent divergence.
+  Recommendation: Define `TaskStatus`, `UserRole` (enum or tuple) in `config/settings.py` and reference everywhere.
+
+  ---
+
+  ### [LOW] Magic Numbers — Validation Bounds and Defaults
+  File: routes/task_routes.py:96, 99, 113, 167, 169, 182; routes/user_routes.py:64, 115; models/task.py:12, 46
+  Description: Title length bounds (3 / 200), priority range (1 / 5), password min length (4), default priority (3)
+  appear as raw integers throughout. `utils/helpers.py:110-116` already defines constants for these but nobody imports
+  them.
+  Impact: Same risk as magic strings — easy divergence; the existing constants prove the intent but are dead code.
+  Recommendation: Import `MIN_TITLE_LENGTH`, `MAX_TITLE_LENGTH`, `MIN_PASSWORD_LENGTH`, etc., from a shared module (move
+   to `config/settings.py`) and use them everywhere.
+
+  ---
+
+  ### [LOW] `print()` Used for Logging
+  File: routes/task_routes.py:149, 153, 219, 234; routes/user_routes.py:83, 89, 147;
+  services/notification_service.py:21, 24; utils/helpers.py:39-41
+  Description: ~10 `print(...)` calls used to log creates/deletes/errors; no `logging` configuration anywhere.
+  Impact: Output cannot be filtered by level, sent to a file, or formatted for production; performance impact under
+  load.
+  Recommendation: Replace with `logging.getLogger(__name__).info(...)`/`exception(...)` and configure a basic logger in
+  `app.py` (or `src/config/logging.py`).
+
+  ---
+
+  ### [LOW] Poor Naming and Inconsistent Style
+  File: models/task.py:45 (`validate_priority(self, p)`), routes/task_routes.py:268 (`for t in results`),
+  routes/user_routes.py:14 (`for u in users`), routes/report_routes.py:24-28 (`p1, p2, p3, p4, p5`)
+  Description: Single-letter variables outside narrow loop bodies; non-descriptive method parameter `p`; counters
+  `p1..p5` instead of named priority levels.
+  Impact: Readability suffers; intent has to be inferred from context.
+  Recommendation: Rename to `priority`, `task`, `user`, and use a dict keyed by priority label
+  (`counts_by_priority['critical']`).
+
+  ---
+
+  ### [LOW] Unused Imports
+  File: app.py:7 (`os, sys, json, datetime` — only `datetime` used); routes/task_routes.py:7 (`json, os, sys, time` —
+  none used); routes/user_routes.py:6 (`hashlib, json` — none used); routes/report_routes.py:7-8 (`format_date`,
+  `calculate_percentage`, `json` — none used); utils/helpers.py:3-7 (`os, sys, math, hashlib` — none used)
+  Description: Multiple modules carry imports that are never referenced.
+  Impact: Noise; mild risk of confusing a future reader about dependencies.
+  Recommendation: Remove unused imports; in `app.py:7` keep only `datetime`.
+
+  ---
+
+  ================================
+  Total: 20 findings
+  Breakdown: CRITICAL 4 | HIGH 6 | MEDIUM 5 | LOW 5
+  ================================

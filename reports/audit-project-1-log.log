@@ -1,0 +1,288 @@
+================================
+  ARCHITECTURE AUDIT REPORT
+  ================================
+  Project: code-smells-project
+  Stack:   Python 3 + Flask 3.1.1
+  Files:   4 analyzed | ~784 lines of code
+
+  ## Summary
+  CRITICAL: 9 | HIGH: 7 | MEDIUM: 6 | LOW: 4
+  Total findings: 26
+
+  ## Findings
+  (ordered CRITICAL → HIGH → MEDIUM → LOW; within same severity, ordered by file)
+
+  ---
+
+  ### [CRITICAL] Hardcoded SECRET_KEY in Source
+  File: app.py:7
+  Description: `app.config["SECRET_KEY"] = "minha-chave-super-secreta-123"` is written directly in source and committed
+  to VCS.
+  Impact: Anyone with repo access can forge sessions/tokens; secret rotation requires a redeploy and code change.
+  Recommendation: Move to `config/settings.py` and load via `os.environ.get("SECRET_KEY")`; document in `.env.example`.
+
+  ---
+
+  ### [CRITICAL] Hardcoded DEBUG=True in Production Boot
+  File: app.py:8, app.py:88
+  Description: `app.config["DEBUG"] = True` and `app.run(..., debug=True)` are hardcoded, enabling the Werkzeug
+  interactive debugger.
+  Impact: In production this exposes a remote code-execution console via the debugger PIN-guess; even with the PIN, full
+   stack traces are leaked to clients.
+  Recommendation: Drive from `Config.DEBUG = os.environ.get("DEBUG", "false").lower() == "true"`.
+
+  ---
+
+  ### [CRITICAL] Arbitrary SQL Execution Endpoint (Auth-less)
+  File: app.py:59-78
+  Description: `POST /admin/query` reads `dados.get("sql", "")` from the request body and runs it verbatim via
+  `cursor.execute(query)`, returning all rows. No authentication, no allowlist, no rate-limit.
+  Impact: Any unauthenticated client can read, modify, or drop every table — full database compromise.
+  Recommendation: Remove this endpoint entirely. If a maintenance tool is needed, gate it behind an authenticated admin
+  role with a parameterized, allowlisted command set.
+
+  ---
+
+  ### [CRITICAL] Destructive Admin Endpoint Without Auth
+  File: app.py:47-57
+  Description: `POST /admin/reset-db` deletes every row in `itens_pedido`, `pedidos`, `produtos`, and `usuarios` with no
+   authentication, CSRF protection, or confirmation.
+  Impact: Trivial denial-of-service / total data loss by any anonymous caller.
+  Recommendation: Either delete this endpoint or wrap it in an authenticated middleware that requires an admin role;
+  expose only in a dev-only blueprint registered when `DEBUG=true`.
+
+  ---
+
+  ### [CRITICAL] Hardcoded SECRET_KEY Leaked Through Health Endpoint
+  File: controllers.py:289
+  Description: `health_check()` returns `"secret_key": "minha-chave-super-secreta-123"` in the JSON response body. The
+  secret is duplicated in source and broadcast on every health probe.
+  Impact: Even if the secret were rotated, the endpoint would still publish it; any external monitor / proxy / log
+  aggregator captures it.
+  Recommendation: Remove `secret_key`, `db_path`, and `debug` keys from the health response; never echo configuration
+  values.
+
+  ---
+
+  ### [CRITICAL] Plain-Text Passwords in Storage and Comparison
+  File: database.py:75-83, models.py:105-120, models.py:122-131
+  Description: Seed users insert `"admin123"`, `"123456"`, `"senha123"` directly into `usuarios.senha`. `login_usuario`
+  compares the raw input against the stored value (`WHERE email = '...' AND senha = '...'`). No hashing of any kind.
+  Impact: A single SELECT (or the SQL-injection vector below) exposes every credential in clear text.
+  Recommendation: Hash with `bcrypt` on create (`bcrypt.hashpw`) and verify with `bcrypt.checkpw`. Add `bcrypt>=4.0` to
+  `requirements.txt`. Re-seed dev fixtures with hashed values.
+
+  ---
+
+  ### [CRITICAL] SQL Injection via String Concatenation Throughout Model Layer
+  File: models.py:28, 47-50, 57-60, 68, 92, 109-110, 126-129, 140, 148-150, 155, 157-160, 163-166, 174, 188, 192, 220,
+  224, 280-281, 289-297
+  Description: Every query is built with string concatenation of user-controlled values. Examples: `"SELECT * FROM
+  produtos WHERE id = " + str(id)` (line 28), `"SELECT * FROM usuarios WHERE email = '" + email + "' AND senha = '" +
+  senha + "'"` (lines 109-110), and a search builder that concatenates `termo`, `categoria`, `preco_min`, `preco_max`
+  (lines 289-297).
+  Impact: Authentication bypass on `/login` (e.g. `' OR '1'='1`), data exfiltration, and arbitrary mutation are trivial.
+  Recommendation: Replace every interpolation with placeholders: `cursor.execute("SELECT ... WHERE id = ?", (id,))`.
+  Centralize per-entity in new model classes.
+
+  ---
+
+  ### [CRITICAL] God File — models.py Mixes Four Domains and Business Logic
+  File: models.py:1-315
+  Description: A single 315-line module contains DB access for `produtos`, `usuarios`, `pedidos`, `itens_pedido`, plus
+  business rules (discount tiers in `relatorio_vendas`, stock validation and total computation in `criar_pedido`). No
+  separation of entities.
+  Impact: Any change risks breaking unrelated domains; impossible to unit-test one entity in isolation.
+  Recommendation: Split into `models/produto_model.py`, `models/usuario_model.py`, `models/pedido_model.py`,
+  `models/item_pedido_model.py`. Move discount and checkout business rules to controllers.
+
+  ---
+
+  ### [CRITICAL] God File — controllers.py Mixes Five Domains
+  File: controllers.py:1-293
+  Description: Single 293-line file holds handlers for produtos, usuários, login, pedidos, relatórios, and health.
+  Validation, business orchestration, and side-effects (print "ENVIANDO EMAIL/SMS/PUSH") are all interleaved.
+  Impact: High coupling, repeated try/except scaffolding, and any new domain forces edits in the same file — merge
+  conflicts and accidental cross-domain regressions.
+  Recommendation: Split into `controllers/produto_controller.py`, `controllers/usuario_controller.py`,
+  `controllers/pedido_controller.py`, etc., and pair each with a `views/<entity>_routes.py` Blueprint.
+
+  ---
+
+  ### [HIGH] Global Mutable DB Connection (Singleton)
+  File: database.py:4-11
+  Description: `db_connection = None` is a module-level global; `get_db()` lazily initializes it with
+  `check_same_thread=False` and stores it on the global. All callers share one connection.
+  Impact: No dependency injection — every model/controller is hard-bound to this singleton, making unit tests impossible
+   without monkey-patching. `check_same_thread=False` plus a single shared connection causes race conditions under
+  concurrent requests.
+  Recommendation: Use Flask's `g` object with `teardown_appcontext`: one connection per request. Build a
+  `models/database.py` factory and inject the connection via `get_db()` from within request context.
+
+  ---
+
+  ### [HIGH] Passwords Returned in Listing & Detail Endpoints
+  File: controllers.py:128-134, controllers.py:136-144, models.py:72-87, models.py:89-103
+  Description: `GET /usuarios` and `GET /usuarios/<id>` build dicts that include `"senha": row["senha"]` directly from
+  the model. Any caller of the API can read every user's password.
+  Impact: Complete credential disclosure even without SQL injection; trivially exploitable.
+  Recommendation: Remove `senha` from the user serializer in the model. Define a `to_safe_dict` that exposes only `id`,
+  `nome`, `email`, `tipo`, `criado_em`.
+
+  ---
+
+  ### [HIGH] Business Logic in Model Layer (relatorio_vendas)
+  File: models.py:235-273
+  Description: `relatorio_vendas()` runs five count/sum queries then applies tiered-discount business rules (`if
+  faturamento > 10000: desconto = faturamento * 0.1` …) and computes `ticket_medio` — pure business logic mixed with
+  data access.
+  Impact: Discount rules cannot be unit-tested without hitting the database; rule changes require touching a SQL file.
+  Recommendation: Keep aggregate queries in `PedidoModel.get_sales_aggregates()`; move discount and ticket-médio
+  calculations to `PedidoController.build_sales_report()` with thresholds/rates read from `config`.
+
+  ---
+
+  ### [HIGH] Business Logic + Multi-Step Orchestration in Model (criar_pedido)
+  File: models.py:133-169
+  Description: Model method performs stock validation, total computation, three sequential mutations (insert pedido,
+  insert itens, decrement estoque), and returns either a result or an `{"erro": ...}` envelope — business rules and
+  persistence intermixed in a single function with no transaction guarantees.
+  Impact: Failure mid-way leaves partial writes (no rollback); business rule "stock must cover quantity" is untestable
+  without DB; error shape leaks into the controller.
+  Recommendation: Move orchestration to `PedidoController.process_checkout()`; have the model expose narrow methods
+  (`get_by_id`, `create_pedido`, `create_item`, `decrement_estoque`) and wrap the whole flow in a `with db: ...`
+  transaction. Raise typed exceptions instead of returning error dicts.
+
+  ---
+
+  ### [HIGH] Validation Logic Embedded in Controller (criar_produto / atualizar_produto)
+  File: controllers.py:24-62, controllers.py:64-96
+  Description: Each handler contains ~30 lines of inline validation (presence, negativity, length range, hard-coded
+  category allowlist) before calling the model. The exact same block is duplicated in `atualizar_produto`.
+  Impact: Validation rules drift between create and update; cannot be tested separately from the HTTP layer.
+  Recommendation: Extract to `ProdutoController.validate_payload(data)` returning `(cleaned, error)`. Allow controllers
+  to focus on orchestration.
+
+  ---
+
+  ### [HIGH] Side-Effects (Notifications) Triggered Inside Controllers
+  File: controllers.py:208-210, controllers.py:247-250
+  Description: `criar_pedido` and `atualizar_status_pedido` emit notifications with `print("ENVIANDO EMAIL: …")` /
+  `print("ENVIANDO SMS: …")` directly in the controller after persistence.
+  Impact: Notifications cannot be disabled in tests, batched, or replaced with a real provider without editing the
+  controller. Pure side-effect concerns leak into the HTTP layer.
+  Recommendation: Extract to a `services/notification_service.py` (or controller helper `_notify_order_created`),
+  invoked from the controller. Even keeping it as a print, isolating the call is enough to make it mockable.
+
+  ---
+
+  ### [HIGH] Admin Routes Defined Inline in app.py with Direct DB Access
+  File: app.py:47-78
+  Description: `/admin/reset-db` and `/admin/query` are declared via `@app.route` inside the composition root and call
+  `cursor.execute()` directly — bypassing the model layer entirely.
+  Impact: `app.py` accumulates business behaviour, violating its role as a thin entrypoint.
+  Recommendation: Either remove (recommended) or relocate to a guarded `views/admin_routes.py` Blueprint and call new
+  model methods.
+
+  ---
+
+  ### [MEDIUM] N+1 Query in get_pedidos_usuario
+  File: models.py:171-201
+  Description: One SELECT fetches all orders for a user, then for each order another SELECT loads items, then for each
+  item a third SELECT fetches the product name — three nested levels.
+  Impact: A user with 20 orders averaging 5 items each costs 1 + 20 + 100 = 121 queries; latency grows linearly with
+  order count.
+  Recommendation: Replace with a single LEFT JOIN across `pedidos`, `itens_pedido`, `produtos`; group rows in Python by
+  `pedido_id`.
+
+  ---
+
+  ### [MEDIUM] N+1 Query in get_todos_pedidos
+  File: models.py:203-233
+  Description: Same N+1 pattern as above, but across all orders system-wide.
+  Impact: O(orders × items) queries per request — degrades the order-list endpoint as data grows.
+  Recommendation: Same JOIN strategy; alternatively, batch-fetch items by `pedido_id IN (...)` then product names in a
+  second IN-query.
+
+  ---
+
+  ### [MEDIUM] No Centralized Error Handler
+  File: app.py (entire), controllers.py:5-292
+  Description: There is no `@app.errorhandler` registration; every controller wraps its body in `try / except Exception
+  as e: return jsonify({"erro": str(e)}), 500`. `str(e)` may leak internal details, and inconsistencies are inevitable.
+  Impact: Stack traces / DB-driver error strings can reach clients; new handlers easily forget the boilerplate, breaking
+   the contract.
+  Recommendation: Add `middlewares/error_handler.py` registering 400/404/422/500/Exception handlers via
+  `register_error_handlers(app)`. Remove per-handler `try/except Exception` and let exceptions propagate.
+
+  ---
+
+  ### [MEDIUM] Duplicated Validation Block (Produto Create vs Update)
+  File: controllers.py:24-62, controllers.py:64-96
+  Description: The presence checks, type/range checks, and JSON-parsing boilerplate are duplicated almost verbatim
+  between `criar_produto` and `atualizar_produto`.
+  Impact: Two places to change a rule; rules already differ slightly (create checks `len(nome) > 200`, update does not).
+  Recommendation: Extract to `ProdutoController._validate(data, partial: bool)` returning a normalized payload or
+  raising `ValueError`.
+
+  ---
+
+  ### [MEDIUM] Duplicated Row-to-Dict Mapping
+  File: models.py:10-22, 30-40, 78-86, 95-102, 178-185, 211-217, 302-313
+  Description: The same `{"id": row["id"], "nome": row["nome"], ...}` dict construction is repeated in seven places
+  (produtos and pedidos serializers, with subtle variations).
+  Impact: Schema additions/renames require updating multiple sites; bugs introduced when one site is missed.
+  Recommendation: Add a single `to_dict()` static method per model class.
+
+  ---
+
+  ### [MEDIUM] Repeated try/except Boilerplate in Every Controller Handler
+  File: controllers.py:5-292
+  Description: 14 of 14 handlers wrap their body in `try / except Exception as e: return jsonify({"erro": str(e)}),
+  500`. Once the centralized handler is added (above), every handler can drop the wrapper.
+  Impact: Visual noise and a single class of error-handling that hides root causes.
+  Recommendation: Delete the wrapper after registering global handlers; let exceptions bubble to the middleware.
+
+  ---
+
+  ### [LOW] Magic Numbers in Discount Tiers
+  File: models.py:257-262
+  Description: Tiers `> 10000`, `> 5000`, `> 1000` and rates `0.1`, `0.05`, `0.02` are inline literals with no
+  explanation.
+  Impact: Business rules are invisible to anyone scanning config; tuning requires a code change.
+  Recommendation: Define `SALES_REPORT_TIERS` (list of tuples) in `config/settings.py`; iterate to pick the applicable
+  tier.
+
+  ---
+
+  ### [LOW] Magic String Lists (Status / Categoria)
+  File: controllers.py:52 (categorias_validas), controllers.py:242 (status list)
+  Description: Allowed categories `["informatica", "moveis", "vestuario", "geral", "eletronicos", "livros"]` and order
+  statuses `["pendente", "aprovado", "enviado", "entregue", "cancelado"]` are inline literals.
+  Impact: Cannot change list without code edit; same list redeclared on each request.
+  Recommendation: Move to `config/settings.py` (or an enum); reference everywhere via `Config.CATEGORIAS_VALIDAS`.
+
+  ---
+
+  ### [LOW] print() Used as Application Logging
+  File: app.py:56, app.py:84-86, controllers.py:8, 11, 57, 61, 106, 161, 179, 182, 208-210, 219, 248, 250
+  Description: Status messages and errors are written with `print(...)` to stdout instead of a structured logger.
+  Impact: No log levels, no destination control, no correlation IDs; production observability is poor.
+  Recommendation: Use `logging.getLogger(__name__)` per module; configure once in `app.py`.
+
+  ---
+
+  ### [LOW] No Input Validation on Login Payload Beyond Presence
+  File: controllers.py:167-186
+  Description: `login()` checks only that `email` and `senha` are non-empty, then concatenates them straight into a SQL
+  string in the model. No length/format checks.
+  Impact: Combined with the SQL injection above, missing validation widens the attack surface.
+  Recommendation: After fixing SQL with placeholders, validate `email` against a simple regex and reject obviously
+  malformed values with `400`.
+
+  ---
+
+  ================================
+  Total: 26 findings
+  Breakdown: CRITICAL 9 | HIGH 7 | MEDIUM 6 | LOW 4
+  ================================

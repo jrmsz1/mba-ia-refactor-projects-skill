@@ -1,0 +1,278 @@
+================================
+  ARCHITECTURE AUDIT REPORT
+  ================================
+  Project: ecommerce-api-legacy
+  Stack:   JavaScript (Node.js) + Express ^4.18.2
+  Files:   3 analyzed | ~180 lines of code
+
+  ## Summary
+  CRITICAL: 5 | HIGH: 8 | MEDIUM: 6 | LOW: 4
+  Total findings: 23
+
+  ## Findings
+  (ordered CRITICAL → HIGH → MEDIUM → LOW; within same severity, ordered by file)
+
+  ---
+
+  ### [CRITICAL] Hardcoded Credentials / Secrets
+  File: src/utils.js:1-7
+  Description: The `config` object embeds production-grade secrets directly in source: `dbPass:
+  "senha_super_secreta_prod_123"`, `paymentGatewayKey: "pk_live_1234567890abcdef"`, plus `dbUser` and `smtpUser`. The
+  `pk_live_` prefix indicates a real payment-gateway live key, not a sandbox key.
+  Impact: Any developer with repo access (or anyone who finds the repo) can charge cards through the payment gateway and
+   access the production DB. The `pk_live_` literal will be permanently captured in git history even if it is rotated.
+  Recommendation: Move every value to `process.env.*` loaded via `dotenv`, expose them through `src/config/index.js`,
+  and add `.env` to `.gitignore`. Rotate the gateway key immediately.
+
+  ---
+
+  ### [CRITICAL] God Class — All Logic in a Single Class
+  File: src/AppManager.js:1-141
+  Description: A single `AppManager` class owns the DB connection (line 7), schema bootstrap and seed data (`initDb`,
+  lines 10-23), and three HTTP route handlers (`setupRoutes`, lines 25-138), where each handler also contains raw SQL,
+  business rules, response formatting, logging, and error responses. Roughly 110 lines of mixed concerns with no layer
+  boundary.
+  Impact: Nothing can be unit-tested in isolation; any change to checkout risks breaking the admin report; the file will
+   grow unboundedly as new domains are added.
+  Recommendation: Apply RT-02 — split into `models/UserModel.js`, `models/CourseModel.js`, `models/EnrollmentModel.js`,
+  `models/PaymentModel.js`, `models/AuditLogModel.js`; `controllers/CheckoutController.js`,
+  `controllers/AdminController.js`, `controllers/UserController.js`; and `routes/*Routes.js` thin HTTP layer.
+
+  ---
+
+  ### [CRITICAL] Insecure / Custom Password Hashing
+  File: src/utils.js:17-23
+  Description: `badCrypto(pwd)` concatenates the first 2 chars of `Buffer.from(pwd).toString('base64')` ten thousand
+  times and returns the first 10 chars. This is not a cryptographic hash — it is deterministic, unsalted, has tiny
+  entropy (a single base64 prefix repeated), and is trivially reversible by reading the first two output chars.
+  Impact: Stored password hashes can be reversed in milliseconds; identical passwords across users produce identical
+  hashes; the function name itself signals it is not safe.
+  Recommendation: Replace with `bcrypt` (npm `bcrypt`) using `bcrypt.hash(pwd, 10)` and `bcrypt.compare()`. Move into a
+  dedicated `models/UserModel.js` or `utils/password.js`.
+
+  ---
+
+  ### [CRITICAL] Plain-Text Password in Seed Data
+  File: src/AppManager.js:18
+  Description: `INSERT INTO users (name, email, pass) VALUES ('Leonan', 'leonan@fullcycle.com.br', '123')` stores the
+  literal password `'123'` in the `pass` column. The schema treats `pass` as plaintext storage, and the seed enforces
+  that convention.
+  Impact: Any user record dumped from the DB exposes the real password; new users created via the checkout route (line
+  69) hash with the broken `badCrypto`, leaving a heterogeneous mix of plaintext and broken hashes in one column.
+  Recommendation: Hash the seed password with bcrypt before insertion and treat the `pass` column as bcrypt-hash-only.
+
+  ---
+
+  ### [CRITICAL] PII / PCI Leak — Card Number and Live Gateway Key Logged
+  File: src/AppManager.js:45
+  Description: `console.log(\`Processando cartão ${cc} na chave ${config.paymentGatewayKey}\`)` writes the full
+  credit-card PAN supplied by the client together with the live payment-gateway key to stdout on every checkout.
+  Impact: Anyone with log access (operators, sidecars, log shippers, third-party log aggregators) gets card numbers and
+  the live gateway key. This is a direct PCI-DSS violation.
+  Recommendation: Remove the log entirely. If a log is needed, log only the last 4 digits (`cc.slice(-4)`) and never log
+   the gateway key.
+
+  ---
+
+  ### [HIGH] Business Logic in Route Handler — Checkout
+  File: src/AppManager.js:28-78
+  Description: The `/api/checkout` handler does request parsing, course lookup, user lookup, optional user creation with
+   hashing, fake "payment authorization" (`cc.startsWith("4") ? "PAID" : "DENIED"`), enrollment insertion, payment
+  insertion, audit-log insertion, and cache write — 50 lines of orchestration with four levels of nested callbacks
+  inside the route.
+  Impact: The checkout business rule (what makes a payment succeed, when an audit log is written, when a user is
+  auto-created) cannot be tested without booting Express; reasoning about partial failure is nearly impossible due to
+  nesting.
+  Recommendation: Apply RT-04 — extract to `controllers/CheckoutController.js::process()` returning a plain
+  object/error; convert sqlite3 calls to a promisified helper and use `async/await`. Keep the route at <10 lines.
+
+  ---
+
+  ### [HIGH] Business Logic in Route Handler — Financial Report
+  File: src/AppManager.js:80-129
+  Description: The `/api/admin/financial-report` handler executes nested `forEach` callbacks over courses → enrollments
+  → user + payment, manually decrements two pending counters (`coursesPending`, `enrPending`) to know when to call
+  `res.json(report)`. 45 lines of asynchronous orchestration directly inside the route.
+  Impact: Untestable; concurrent requests share no isolation; one slow query stalls the response without any timeout;
+  logic error in either counter silently leaks the response or sends it twice.
+  Recommendation: Extract to `controllers/AdminController.js::financialReport()`. Replace counters with `Promise.all`
+  after promisifying the model methods, or — preferably — a single SQL aggregation query (see N+1 finding below).
+
+  ---
+
+  ### [HIGH] Global Mutable State
+  File: src/utils.js:9-10
+  Description: `let globalCache = {}` and `let totalRevenue = 0` are module-level mutable bindings exported and mutated
+  from `logAndCache` (line 14).
+  Impact: Two concurrent requests can race on `globalCache`; tests that exercise checkout permanently mutate this state
+  across the test suite; `totalRevenue` is exported but never updated, signalling intent that was never wired up.
+  Recommendation: Delete `totalRevenue`. If caching is needed, replace `globalCache` with a single-instance cache
+  injected into the controller layer (or remove `logAndCache` entirely since it is purely a side-effect logger).
+
+  ---
+
+  ### [HIGH] No Dependency Injection — DB Coupled in Constructor
+  File: src/AppManager.js:7
+  Description: `this.db = new sqlite3.Database(':memory:')` is created inside the class constructor with a hardcoded
+  path. Every route handler captures `this.db` (and a `self` alias on line 26 because of `function(err)` callbacks).
+  Impact: The class cannot be instantiated with a different DB for tests; swapping to PostgreSQL requires editing the
+  class; the `:memory:` DB cannot be shared across worker processes.
+  Recommendation: Create `src/models/database.js` that exports a connection initialized from `config.databaseUrl`, and
+  inject (or require) it inside each model file. The constructor disappears entirely.
+
+  ---
+
+  ### [HIGH] Missing Input Validation — Checkout
+  File: src/AppManager.js:29-35
+  Description: The checkout handler reads `usr`, `eml`, `pwd`, `c_id`, `card` from `req.body` and only checks `if (!u ||
+   !e || !cid || !cc)`. `pwd` is never validated (the code later relies on a default), `c_id` is not type-checked before
+   being passed to SQL, `eml` is not validated as an email, and `card` is not validated as digits-only or by length.
+  Impact: A POST with `c_id: "abc"` or with a malformed body shape causes confusing 404/500 responses; a missing `pwd`
+  triggers the password-fallback CRITICAL finding below.
+  Recommendation: Validate the body in the controller (or a `joi`/`zod` schema in middleware) — required fields, email
+  format, numeric `c_id`, digits-only `card`. Return 400 with a structured error.
+
+  ---
+
+  ### [HIGH] Missing Authentication on Admin Endpoint
+  File: src/AppManager.js:80
+  Description: `app.get('/api/admin/financial-report', ...)` exposes course-level revenue, every student's name and
+  email, and per-student paid amounts to any caller — no auth header, no session, no role check.
+  Impact: Public revenue disclosure plus a student PII dump from a single GET.
+  Recommendation: Add an `authMiddleware` (and `requireRole('admin')`) registered before the `/api/admin/*` routes.
+
+  ---
+
+  ### [HIGH] Missing Authentication / Authorization on User Delete
+  File: src/AppManager.js:131-137
+  Description: `app.delete('/api/users/:id', ...)` deletes any user by id with no authentication, no ownership check, no
+   role check.
+  Impact: Any caller can wipe any user account. Combined with the orphan-records finding below, this also produces
+  durable DB corruption.
+  Recommendation: Require auth middleware; restrict to admin role or to the authenticated user's own id.
+
+  ---
+
+  ### [HIGH] Default Password Fallback Hides Missing Input
+  File: src/AppManager.js:68
+  Description: `let hash = badCrypto(p || "123456")` silently substitutes the literal `"123456"` when the request omits
+  `pwd`. New auto-created users then have a known, attacker-guessable password.
+  Impact: Every user created without `pwd` shares the same weak password; combined with the broken `badCrypto`, the
+  resulting hash is identical for all such users.
+  Recommendation: Reject the request with 400 if `pwd` is missing during user auto-creation. Move user creation to
+  `UserModel.create()` after `bcrypt`-hashing the validated password.
+
+  ---
+
+  ### [MEDIUM] N+1 (actually N×M+1) Queries in Financial Report
+  File: src/AppManager.js:83-128
+  Description: The handler runs `SELECT * FROM courses` (1 query), then for each course runs `SELECT * FROM enrollments
+  WHERE course_id = ?` (N queries), then for each enrollment runs both `SELECT name, email FROM users WHERE id = ?` and
+  `SELECT amount, status FROM payments WHERE enrollment_id = ?` (2×M queries). Total: 1 + N + 2×M round-trips per
+  request.
+  Impact: API latency grows linearly with enrolments; 50 courses × 1000 enrolments = 2,051 SQL round-trips per report.
+  Recommendation: Replace with a single aggregation query joining `courses`, `enrollments`, `users`, `payments`,
+  grouping by course in SQL (or one batched `IN (...)` per table). Implement in `AdminModel.getFinancialReport()`.
+
+  ---
+
+  ### [MEDIUM] No Centralized Error Handler
+  File: src/AppManager.js (entire file)
+  Description: Errors are handled inline with ad-hoc strings: `res.status(500).send("Erro DB")` (line 41), `"Erro
+  Matrícula"` (line 51), `"Erro Pagamento"` (line 55), `"Curso não encontrado"` (line 38), with no shared shape. The
+  Express `(err, req, res, next)` middleware is not registered anywhere.
+  Impact: Inconsistent error shape forces clients to special-case strings; uncaught exceptions in promise chains crash
+  the process; nothing logs structured errors.
+  Recommendation: Apply RT-06 — add `middlewares/errorHandler.js`, refactor handlers to `next(err)` on failure, and
+  standardize on `{ error, detail }` JSON responses.
+
+  ---
+
+  ### [MEDIUM] No Transaction Around Checkout's Multi-Step Write
+  File: src/AppManager.js:50-62
+  Description: Checkout does four sequential writes (optional user insert → enrollment insert → payment insert →
+  audit-log insert) outside any transaction. Any failure between steps leaves the DB in a partial state (e.g.,
+  enrollment without payment, or payment without audit log).
+  Impact: Reconciliation against the gateway becomes manual; the financial report counts revenue for orphan rows.
+  Recommendation: Wrap the four writes in `BEGIN`/`COMMIT` (or use a transaction helper) inside `CheckoutController`
+  after promisifying sqlite3.
+
+  ---
+
+  ### [MEDIUM] Orphan Records on User Delete
+  File: src/AppManager.js:131-137
+  Description: `DELETE FROM users WHERE id = ?` is executed alone; the response literally says `"Usuário deletado, mas
+  as matrículas e pagamentos ficaram sujos no banco."`, advertising the data-integrity bug.
+  Impact: `enrollments` and `payments` retain rows referencing a nonexistent `user_id`, breaking the financial report's
+  `users` join and producing `"Unknown"` student entries.
+  Recommendation: Either declare `ON DELETE CASCADE` on the FK columns in `initDb`, or perform `DELETE FROM payments
+  WHERE enrollment_id IN (...)` → `DELETE FROM enrollments WHERE user_id = ?` → `DELETE FROM users` inside a transaction
+   in `UserController.delete()`.
+
+  ---
+
+  ### [MEDIUM] Swallowed Error on User Delete
+  File: src/AppManager.js:133-136
+  Description: The callback receives `(err)` but never inspects it before sending a 200 response. A failed delete
+  reports success to the client.
+  Impact: Clients believe the operation succeeded; no log entry; the inconsistent state goes undetected.
+  Recommendation: Check `if (err) return next(err)` and let the centralized handler respond with 500.
+
+  ---
+
+  ### [MEDIUM] Code Duplication — Repeated Error Patterns
+  File: src/AppManager.js:38,41,51,55,84
+  Description: Five separate variations of `if (err) return res.status(500).send("...")` and `if (!x) return
+  res.status(404).send("...")` with different Portuguese strings, all expressing the same intent.
+  Impact: Any change to error contract (e.g., switching to JSON) requires editing every occurrence; clients can't
+  programmatically distinguish error types.
+  Recommendation: Centralized error handler (see MEDIUM finding above) plus a `NotFoundError` / `ValidationError` class.
+   Controllers `throw` typed errors; the middleware maps them to status + JSON.
+
+  ---
+
+  ### [LOW] Magic Decision — Payment Status from Card Prefix
+  File: src/AppManager.js:46
+  Description: `let status = cc.startsWith("4") ? "PAID" : "DENIED"` decides payment status by card-number prefix with
+  no named constant or comment. The literal `"4"`, `"PAID"`, `"DENIED"` are magic strings.
+  Impact: A reader cannot tell whether this is a real (broken) integration with the gateway or a deliberate stub; status
+   strings are duplicated across the file.
+  Recommendation: Replace with a `PaymentService.authorize(card, amount)` stub that returns `PaymentStatus.PAID |
+  PaymentStatus.DENIED`; export the status constants from a single module.
+
+  ---
+
+  ### [LOW] Poor Naming — Single-Letter Locals in Checkout
+  File: src/AppManager.js:29-33
+  Description: The checkout route uses `u`, `e`, `p`, `cid`, `cc` for `usr`/`eml`/`pwd`/`c_id`/`card`. While the API
+  contract uses the short keys, the internal variables propagate the abbreviation through 50 lines of nested callbacks.
+  Impact: Readability — a reader on line 68 must scroll to line 31 to remember `p` is the password.
+  Recommendation: Rename to `name`, `email`, `password`, `courseId`, `card` inside the controller. Translate request
+  keys at the boundary.
+
+  ---
+
+  ### [LOW] Dead Export — `totalRevenue` Never Updated
+  File: src/utils.js:10,25
+  Description: `let totalRevenue = 0` is declared and exported but never assigned anywhere in the codebase. `AppManager`
+   imports it on line 2 but never reads or writes it.
+  Impact: Dead state that confuses readers expecting it to track revenue.
+  Recommendation: Delete the variable and its export. Drop the import in `AppManager.js`.
+
+  ---
+
+  ### [LOW] Pre-ES6 Workaround — `let self = this`
+  File: src/AppManager.js:26
+  Description: `let self = this;` is captured so that classic `function(err)` sqlite callbacks (lines 50, 54, 57) can
+  reach instance state. Modern arrow callbacks bind `this` automatically — except sqlite3's `function(err){ this.lastID
+  }` requires the function form for `this.lastID`.
+  Impact: Mixed callback styles in one function obscure intent.
+  Recommendation: After promisifying sqlite3 (or using `better-sqlite3` / `sqlite` wrapper), drop the `self` alias and
+  use `async/await`.
+
+  ---
+
+  ================================
+  Total: 23 findings
+  Breakdown: CRITICAL 5 | HIGH 8 | MEDIUM 6 | LOW 4
+  ================================
