@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pip install --quiet -r requirements.txt)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'src'\\); from app import create_app; app = create_app\\(\\); print\\('boot ok'\\); print\\('routes:', sorted\\([r.rule for r in app.url_map.iter_rules\\(\\)]\\)\\)\")",
+      "Bash(python src/app.py)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5000/health)",
+      "Bash(curl -s http://127.0.0.1:5000/)",
+      "Bash(curl -s http://127.0.0.1:5000/health)",
+      "Bash(curl -s http://127.0.0.1:5000/produtos)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('total produtos =', len\\(d['dados']\\), '| sample:', d['dados'][0]['nome'] if d['dados'] else None\\)\")",
+      "Bash(curl -s \"http://127.0.0.1:5000/produtos/busca?q=mouse\")",
+      "Bash(curl -s http://127.0.0.1:5000/produtos/1)",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/login -H \"Content-Type: application/json\" -d '{\"email\":\"admin@loja.com\",\"senha\":\"admin123\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/login -H \"Content-Type: application/json\" -d '{\"email\":\"admin@loja.com\",\"senha\":\"wrong\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/login -H \"Content-Type: application/json\" -d \"{\\\\\"email\\\\\":\\\\\"admin@loja.com' OR '1'='1\\\\\",\\\\\"senha\\\\\":\\\\\"x\\\\\"}\")",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/pedidos -H 'Content-Type: application/json' -d '{\"usuario_id\":2,\"itens\":[{\"produto_id\":1,\"quantidade\":1},{\"produto_id\":2,\"quantidade\":3}]}')",
+      "Bash(curl -s http://127.0.0.1:5000/pedidos)",
+      "Bash(curl -s -X PUT http://127.0.0.1:5000/pedidos/1/status -H \"Content-Type: application/json\" -d '{\"status\":\"aprovado\"}')",
+      "Bash(curl -s -X PUT http://127.0.0.1:5000/pedidos/1/status -H \"Content-Type: application/json\" -d '{\"status\":\"xxx\"}')",
+      "Bash(curl -s http://127.0.0.1:5000/relatorios/vendas)",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/produtos -H 'Content-Type: application/json' -d '{\"nome\":\"Teste\",\"preco\":10.5,\"estoque\":5,\"categoria\":\"informatica\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/produtos -H 'Content-Type: application/json' -d '{\"nome\":\"X\",\"preco\":-1,\"estoque\":5}')",
+      "Bash(curl -s http://127.0.0.1:5000/usuarios)",
+      "Bash(curl -s -o /dev/null -w \"status=%{http_code}\\\\n\" -X POST http://127.0.0.1:5000/admin/query -H \"Content-Type: application/json\" -d '{\"sql\":\"SELECT 1\"}')",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

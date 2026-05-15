@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(node src/app.js)",
+      "Bash(curl -s -o C:/Users/jrmsz1/AppData/Local/Temp/boot.log -w \"boot-check-status=%{http_code}\\\\n\" http://localhost:3000/)",
+      "Read(//c/Users/jrmsz1/AppData/Local/Temp/**)",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X POST http://localhost:3000/api/checkout -H \"Content-Type: application/json\" -d '{\"usr\":\"Guilherme\",\"eml\":\"gui@fullcycle.com.br\",\"pwd\":\"senhaforte\",\"c_id\":2,\"card\":\"4111222233334444\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X POST http://localhost:3000/api/checkout -H \"Content-Type: application/json\" -d '{\"usr\":\"Joao\",\"eml\":\"joao@teste.com\",\"pwd\":\"123\",\"c_id\":1,\"card\":\"5111222233334444\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X POST http://localhost:3000/api/checkout -H \"Content-Type: application/json\" -d '{\"usr\":\"X\",\"eml\":\"x@x.com\",\"c_id\":1,\"card\":\"4111\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X POST http://localhost:3000/api/checkout -H \"Content-Type: application/json\" -d '{\"usr\":\"Y\",\"eml\":\"y@y.com\",\"pwd\":\"p\",\"c_id\":999,\"card\":\"4111\"}')",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" http://localhost:3000/api/admin/financial-report)",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X DELETE http://localhost:3000/api/users/1)",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X DELETE http://localhost:3000/api/users/9999)",
+      "Bash(curl -s -w \"\\\\nHTTP=%{http_code}\\\\n\" -X DELETE http://localhost:3000/api/users/abc)",
+      "Bash(taskkill //F //IM node.exe)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

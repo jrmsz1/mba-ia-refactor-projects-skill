@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import bcrypt\")",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(curl -sf http://127.0.0.1:5000/health)",
+      "Bash(curl -s http://127.0.0.1:5000/health)",
+      "Bash(curl -s http://127.0.0.1:5000/tasks)",
+      "Bash(curl -s http://127.0.0.1:5000/tasks/stats)",
+      "Bash(curl -s http://127.0.0.1:5000/users)",
+      "Bash(curl -s http://127.0.0.1:5000/categories)",
+      "Bash(curl -s http://127.0.0.1:5000/reports/summary)",
+      "Bash(curl -s http://127.0.0.1:5000/reports/user/1)",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/login -H \"Content-Type: application/json\" -d '{\"email\":\"joao@email.com\",\"password\":\"1234\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/login -H \"Content-Type: application/json\" -d '{\"email\":\"joao@email.com\",\"password\":\"wrong\"}')",
+      "Bash(curl -s -X POST http://127.0.0.1:5000/tasks -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:5000/tasks/9999)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}
